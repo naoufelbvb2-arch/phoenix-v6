@@ -1,0 +1,37 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# checkpoints and model artifacts
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# data caches
+data/
+.cache/
+*.arrow
+*.jsonl.gz
+
+# env
+.env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
