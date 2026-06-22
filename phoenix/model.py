@@ -238,13 +238,21 @@ class PhoenixModel(nn.Module):
         B, T = tokens.shape
         rope = self._get_rope(T, tokens.device)
 
-        x = self.embed(tokens)             # (B, T, d_model)
-        x = self.trunk(x, rope)            # (B, T, d_model)
-        x = self.zones[zone_label](x, rope)  # (B, T, d_model)
+        x = self.embed(tokens)
+        x = self.trunk(x, rope)
+        x = self.zones[zone_label](x, rope)
+        return F.linear(x, self.embed.weight)
 
-        # tied output head
-        logits = F.linear(x, self.embed.weight)  # (B, T, vocab_size)
-        return logits
+    def forward_trunk_only(self, tokens: torch.Tensor) -> torch.Tensor:
+        """
+        Embed -> trunk -> head, bypassing all zones.
+        Used during Stage A training and for the M1 specialization baseline.
+        """
+        T = tokens.shape[1]
+        rope = self._get_rope(T, tokens.device)
+        x = self.embed(tokens)
+        x = self.trunk(x, rope)
+        return F.linear(x, self.embed.weight)
 
     # -----------------------------------------------------------------------
     # Freeze helpers
