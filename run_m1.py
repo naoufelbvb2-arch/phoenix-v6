@@ -89,13 +89,25 @@ print(f"[config] STAGE={STAGE}  DEBUG={DEBUG}  SEQ_LEN={SEQ_LEN}")
 IN_COLAB = False
 try:
     import google.colab  # noqa: F401
-    from google.colab import drive
-    drive.mount("/content/drive", force_remount=False)
     IN_COLAB = True
-except (ImportError, ModuleNotFoundError):
+except ImportError:
     pass
 
-CKPT_DIR = Path(DRIVE_ROOT) if IN_COLAB else Path("./checkpoints/m1")
+if IN_COLAB:
+    # Drive must already be mounted by the notebook cell before running
+    # this script. Verify it is accessible; fail fast with instructions.
+    drive_path = Path("/content/drive/MyDrive")
+    if not drive_path.exists():
+        raise RuntimeError(
+            "Google Drive is not mounted. "
+            "Run this in a notebook cell first:\n"
+            "  from google.colab import drive\n"
+            "  drive.mount('/content/drive')"
+        )
+    CKPT_DIR = Path(DRIVE_ROOT)
+else:
+    CKPT_DIR = Path("./checkpoints/m1")
+
 CKPT_DIR.mkdir(parents=True, exist_ok=True)
 print(f"[config] Checkpoint dir: {CKPT_DIR}")
 
