@@ -88,21 +88,18 @@ print(f"[config] STAGE={STAGE}  DEBUG={DEBUG}  SEQ_LEN={SEQ_LEN}")
 # ============================================================
 IN_COLAB = False
 try:
-    import google.colab  # noqa: F401
+    import google.colab
     IN_COLAB = True
-except ImportError:
+except (ImportError, ModuleNotFoundError):
     pass
 
 if IN_COLAB:
-    # Drive must already be mounted by the notebook cell before running
-    # this script. Verify it is accessible; fail fast with instructions.
-    drive_path = Path("/content/drive/MyDrive")
-    if not drive_path.exists():
+    drive_root = Path("/content/drive/MyDrive")
+    if not drive_root.exists():
         raise RuntimeError(
-            "Google Drive is not mounted. "
-            "Run this in a notebook cell first:\n"
-            "  from google.colab import drive\n"
-            "  drive.mount('/content/drive')"
+            "\n[ERROR] Mount Drive first in a notebook cell:\n"
+            "    from google.colab import drive\n"
+            "    drive.mount('/content/drive')\n"
         )
     CKPT_DIR = Path(DRIVE_ROOT)
 else:
@@ -212,14 +209,14 @@ def _dl_stage_a() -> torch.Tensor:
     parts = []
 
     print("    Streaming wikitext-103 (general text)...")
-    wiki = load_dataset("wikitext", "wikitext-103-raw-v1",
+    wiki = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1",
                         split="train", streaming=True)
     parts.append(collect_tokens(wiki, "text", per))
 
-    print("    Streaming the-stack-smol / Python (code)...")
+    print("    Streaming codeparrot/python-codes-25k (code)...")
     code = load_dataset(
-        "bigcode/the-stack-smol", data_dir="data/python",
-        split="train", streaming=True, trust_remote_code=True,
+        "codeparrot/python-codes-25k",
+        split="train", streaming=True,
     )
     parts.append(collect_tokens(code, "content", per))
 
@@ -234,10 +231,10 @@ def _dl_stage_a() -> torch.Tensor:
 
 
 def _dl_z1() -> torch.Tensor:
-    print("    Streaming the-stack-smol / Python (Z1 code)...")
+    print("    Streaming codeparrot/python-codes-25k (Z1 code)...")
     ds = load_dataset(
-        "bigcode/the-stack-smol", data_dir="data/python",
-        split="train", streaming=True, trust_remote_code=True,
+        "codeparrot/python-codes-25k",
+        split="train", streaming=True,
     )
     return collect_tokens(ds, "content", Z1_TOKENS + EVAL_TOKENS)
 
