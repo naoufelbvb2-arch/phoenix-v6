@@ -213,9 +213,9 @@ def _dl_stage_a() -> torch.Tensor:
                         split="train", streaming=True)
     parts.append(collect_tokens(wiki, "text", per))
 
-    print("    Streaming codeparrot/python-codes-25k (code)...")
+    print("    Streaming codeparrot/codeparrot-clean (code)...")
     code = load_dataset(
-        "codeparrot/python-codes-25k",
+        "codeparrot/codeparrot-clean",
         split="train", streaming=True,
     )
     parts.append(collect_tokens(code, "content", per))
@@ -231,9 +231,9 @@ def _dl_stage_a() -> torch.Tensor:
 
 
 def _dl_z1() -> torch.Tensor:
-    print("    Streaming codeparrot/python-codes-25k (Z1 code)...")
+    print("    Streaming codeparrot/codeparrot-clean (Z1 code)...")
     ds = load_dataset(
-        "codeparrot/python-codes-25k",
+        "codeparrot/codeparrot-clean",
         split="train", streaming=True,
     )
     return collect_tokens(ds, "content", Z1_TOKENS + EVAL_TOKENS)
