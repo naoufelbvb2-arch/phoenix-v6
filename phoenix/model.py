@@ -357,7 +357,9 @@ class PhoenixModel(nn.Module):
         if d_internal is None:
             # FFN up-projection shape: d_model -> d_ff (= d_internal)
             d_internal = v1.blocks[0].ffn.up.out_features
+        device = next(self.parameters()).device
         self.zones[name].grow(self.cfg, n_layers, d_internal)
+        self.zones[name].v2.to(device)
         print(f"[grow] {name}-V2 attached: {n_layers} layers, d_internal={d_internal}")
 
     def freeze_all_except_v2(self, name: str):
