@@ -169,24 +169,89 @@ class ZoneV1(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Zone container (will later also hold V2)
+# Zone V2  (grown version, Safe-Zero: contributes exactly 0 at init)
+# ---------------------------------------------------------------------------
+
+class ZoneV2(nn.Module):
+    """
+    A grown version attached beneath V1.
+
+    Design:
+      - Reads V1's output (the residual stream) -- this IS the bridge; it is
+        causal and needs no extra cross-position pooling (which would leak
+        future tokens in a causal LM).
+      - out_proj is ZERO-INITIALIZED (Safe-Zero) so the contribution is
+        EXACTLY 0 at initialization -> the grown model is functionally
+        identical to V1-only until V2 is trained.
+      - alpha is a learnable scalar gate.
+
+    forward returns the CONTRIBUTION (a delta), which the Zone adds to the
+    stream:  x_out = x + (mask *) zoneV2(x)
+    """
+    def __init__(self, cfg: PhoenixConfig, n_layers: int, d_internal: int):
+        super().__init__()
+        self.blocks = nn.ModuleList([
+            TransformerBlock(cfg.d_model, cfg.n_heads, d_internal,
+                             cfg.max_seq_len, cfg.rope)
+            for _ in range(n_layers)
+        ])
+        self.out_proj = nn.Linear(cfg.d_model, cfg.d_model, bias=False)
+        nn.init.zeros_(self.out_proj.weight)          # Safe-Zero
+        self.alpha = nn.Parameter(torch.tensor(1.0))  # learnable gate
+
+    def forward(self, x: torch.Tensor, rope: torch.Tensor) -> torch.Tensor:
+        h = x
+        for blk in self.blocks:
+            h = blk(h, rope)
+        return self.alpha * self.out_proj(h)          # delta (0 at init)
+
+
+# ---------------------------------------------------------------------------
+# Zone container (holds V1, optionally V2)
 # ---------------------------------------------------------------------------
 
 class Zone(nn.Module):
     """
-    Container for zone versions. Currently holds v1 only.
-    V2 can be attached later without touching v1 or anything else.
+    Container for zone versions. Holds v1; v2 is attached later via grow().
+    Attaching V2 never touches v1, the trunk, other zones, or embed/head.
+
+    v2_mode:
+      "off"     -> v1 only (pre-growth behaviour; default)
+      "always"  -> x = v1(x) + zoneV2(v1(x))
+      "cascade" -> apply V2 only where V1 is uncertain (entropy >= tau)
     """
     def __init__(self, cfg: PhoenixConfig, n_layers: int, d_internal: int):
         super().__init__()
         self.v1 = ZoneV1(cfg, n_layers, d_internal)
-        # self.v2 = None  -- added by grow()
+        self.v2 = None
 
-    def forward(self, x: torch.Tensor, rope: torch.Tensor) -> torch.Tensor:
+    def grow(self, cfg: PhoenixConfig, n_layers: int, d_internal: int):
+        self.v2 = ZoneV2(cfg, n_layers, d_internal)
+
+    def forward(self, x: torch.Tensor, rope: torch.Tensor,
+                v2_mode: str = "off",
+                head_weight: torch.Tensor | None = None,
+                tau: float = 0.5) -> torch.Tensor:
         x = self.v1(x, rope)
-        if hasattr(self, "v2") and self.v2 is not None:
-            x = self.v2(x, rope)
-        return x
+        if self.v2 is None or v2_mode == "off":
+            return x
+
+        contribution = self.v2(x, rope)
+
+        if v2_mode == "always":
+            return x + contribution
+
+        if v2_mode == "cascade":
+            # entropy of V1's next-token distribution via the (frozen) head
+            with torch.no_grad():
+                logits = F.linear(x, head_weight)              # (B, T, V)
+                p   = F.softmax(logits, dim=-1)
+                lp  = F.log_softmax(logits, dim=-1)
+                ent = -(p * lp).sum(-1) / math.log(logits.size(-1))  # (B,T) in [0,1]
+                mask = (ent >= tau).float().unsqueeze(-1)      # (B,T,1)
+            return x + mask * contribution
+
+        raise ValueError(f"unknown v2_mode: {v2_mode}")
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +273,7 @@ class PhoenixModel(nn.Module):
         # we do NOT create a separate nn.Linear here to avoid duplicating the
         # parameter; instead we call F.linear at forward time.
 
-        # RoPE cache — not a parameter, rebuilt on first forward if too short
+        # RoPE cache -- not a parameter, rebuilt on first forward if too short
         self._rope_cache: dict = {}
 
         self._init_weights()
@@ -229,10 +294,12 @@ class PhoenixModel(nn.Module):
             self._rope_cache[key] = _build_rope_cache(seq_len, head_dim, device)
         return self._rope_cache[key]
 
-    def forward(self, tokens: torch.Tensor, zone_label: str) -> torch.Tensor:
+    def forward(self, tokens: torch.Tensor, zone_label: str,
+                v2_mode: str = "off", tau: float = 0.5) -> torch.Tensor:
         """
         tokens     : (B, T)  long
         zone_label : str, must be in self.zones
+        v2_mode    : "off" | "always" | "cascade"   (default "off" = pre-growth)
         returns    : logits (B, T, vocab_size)
         """
         B, T = tokens.shape
@@ -240,7 +307,8 @@ class PhoenixModel(nn.Module):
 
         x = self.embed(tokens)
         x = self.trunk(x, rope)
-        x = self.zones[zone_label](x, rope)
+        x = self.zones[zone_label](x, rope, v2_mode=v2_mode,
+                                   head_weight=self.embed.weight, tau=tau)
         return F.linear(x, self.embed.weight)
 
     def forward_trunk_only(self, tokens: torch.Tensor) -> torch.Tensor:
@@ -274,6 +342,40 @@ class PhoenixModel(nn.Module):
     def unfreeze_zone(self, name: str):
         self.zones[name].train()
         for p in self.zones[name].parameters():
+            p.requires_grad_(True)
+
+    # -----------------------------------------------------------------------
+    # Growth helpers (M3 / M4)
+    # -----------------------------------------------------------------------
+
+    def grow_zone(self, name: str, n_layers: int | None = None,
+                  d_internal: int | None = None):
+        """Attach V2 beneath the named zone's V1. Same shape as V1 by default."""
+        v1 = self.zones[name].v1
+        if n_layers is None:
+            n_layers = len(v1.blocks)
+        if d_internal is None:
+            # FFN up-projection shape: d_model -> d_ff (= d_internal)
+            d_internal = v1.blocks[0].ffn.up.out_features
+        self.zones[name].grow(self.cfg, n_layers, d_internal)
+        print(f"[grow] {name}-V2 attached: {n_layers} layers, d_internal={d_internal}")
+
+    def freeze_all_except_v2(self, name: str):
+        """
+        Freeze the entire model, then unfreeze only the named zone's V2 + alpha.
+        This is the M3/M4 growth-training configuration.
+        """
+        self.freeze_module(self.embed)
+        self.freeze_module(self.trunk)
+        for zn in self.zones:
+            self.freeze_module(self.zones[zn].v1)
+            if self.zones[zn].v2 is not None:
+                self.freeze_module(self.zones[zn].v2)
+        v2 = self.zones[name].v2
+        if v2 is None:
+            raise RuntimeError(f"zone '{name}' has no V2 -- call grow_zone first")
+        v2.train()
+        for p in v2.parameters():
             p.requires_grad_(True)
 
     def count_trainable(self) -> int:
